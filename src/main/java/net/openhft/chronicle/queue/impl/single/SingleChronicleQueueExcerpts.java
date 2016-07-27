@@ -683,7 +683,6 @@ public class SingleChronicleQueueExcerpts {
         private int indexSpacingMask;
         private Wire wireForIndex;
         private boolean readAfterReplicaAcknowledged;
-        // private boolean didntMovePast = false;
 
         public StoreTailer(@NotNull final SingleChronicleQueue queue) {
             this.queue = queue;
@@ -747,18 +746,10 @@ public class SingleChronicleQueueExcerpts {
         }
 
         private boolean next(boolean includeMetaData) throws UnrecoverableTimeoutException, StreamCorruptedException {
-            /*if (didntMovePast) {
-                System.out.println("didntMovePastEOF on last one");
-                System.out.println("currently :: store: " + this.store + " cycle: " + cycle + " index: " + index);
-                didntMovePast = false;
-            }*/
             if (this.store == null) {
                 if (this.index > 0 && this.cycle != Integer.MIN_VALUE) {
                     if (direction == TailerDirection.FORWARD)
-                        // System.out.println("Store was null, trying to attemptToAdvanceCycle.");
                         if (!attemptToAdvanceCycle()) {
-                            // System.out.println("Did not move past!");
-                            // didntMovePast = true;
                             return false;
                         }
                 } else { // load the first store
@@ -772,7 +763,6 @@ public class SingleChronicleQueueExcerpts {
             for (int i = 0; i < 1000; i++) {
                 Wire wire = wire();
                 if (wire == null) {
-                    System.out.println("Wire was null");
                     // Needed for TailerDirection.BACKWARDS
                     return false;
                 }
@@ -815,13 +805,9 @@ public class SingleChronicleQueueExcerpts {
                     return true;
 
                 } catch (EOFException eof) {
-                    // System.out.println("Caught EOF, trying to advanceCycle.");
                     if (!attemptToAdvanceCycle()) {
-                        // System.out.println("Failed to advanceCycle.");
                         return false;
-                    }
-                    // System.out.println("moved past EOF");
-                    // continue
+                    } // continue
                 }
             }
             throw new IllegalStateException("Unable to progress to the next cycle");
@@ -829,7 +815,6 @@ public class SingleChronicleQueueExcerpts {
 
         private boolean attemptToAdvanceCycle() {
             if (cycle <= queue.lastCycle() && direction != TailerDirection.NONE) {
-                // System.out.println("Moving past EOF :: store: " + this.store + " cycle: " + cycle + " index: " + index);
                 // if the tailer called toEnd before a cycle was there, cycle will still be Integer.MIN_VALUE
                 if (cycle == Integer.MIN_VALUE)
                     cycle = queue.lastCycle - 1;  // rollback one so we advance.
@@ -837,19 +822,14 @@ public class SingleChronicleQueueExcerpts {
                 // assume the the next cycle is at the next cycle index, ie not cycles
                 // skipped
                 if (moveToIndex(cycle + direction.add(), 0) == ScanResult.FOUND) {
-                    // System.out.println("Found next cycle at next cycle index :: store: " + this.store + " cycle: " + cycle + " index: " + index);
                     return true;
                 }
 
-                // System.out.println("Didnt find next cycle at next cycle index :: store: " + this.store + " cycle: " + cycle + " index: " + index);
-
                 try {
                     int cycle = queue.nextCycle(this.cycle, direction);
-                    // System.out.println("nextCycle: " + cycle);
                     if (cycle == -1)
                         return false;
                     if (moveToIndex(cycle, 0) == ScanResult.FOUND) {
-                        // System.out.println("moved to next cycle");
                         return true;
                     }
                 } catch (ParseException e) {

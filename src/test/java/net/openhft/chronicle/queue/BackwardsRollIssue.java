@@ -41,10 +41,10 @@ import static net.openhft.chronicle.queue.RollCycles.TEST_SECONDLY;
 import static org.junit.Assert.assertEquals;
 
 public class BackwardsRollIssue extends ChronicleQueueTestBase {
-    private static final int BYTES_LENGTH = 64;
+    private static final int BYTES_LENGTH = 256;
     private static final int BLOCK_SIZE = 256 << 20;
-    private static final long INTERVAL_US = 500;
-    private final int NUMBER_OF_TAILERS = 2;
+    private static final int NUMBER_OF_TAILERS = 2;
+    private static final long INTERVAL_US = 25;
 
     @Test()
     public void doTest() throws IOException, InterruptedException {
