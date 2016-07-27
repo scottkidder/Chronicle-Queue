@@ -20,21 +20,31 @@ import net.openhft.affinity.AffinityLock;
 import net.openhft.chronicle.bytes.Bytes;
 import net.openhft.chronicle.bytes.NativeBytes;
 import net.openhft.chronicle.core.Jvm;
+import net.openhft.chronicle.queue.impl.RollingChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import net.openhft.chronicle.threads.NamedThreadFactory;
+import net.openhft.chronicle.wire.DocumentContext;
 import net.openhft.chronicle.wire.WireType;
+import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static net.openhft.chronicle.queue.RollCycles.TEST_SECONDLY;
 import static org.junit.Assert.assertEquals;
 
 public class BackwardsRollIssue extends ChronicleQueueTestBase {
-    private static final int BYTES_LENGTH = 256;
+    private static final int BYTES_LENGTH = 64;
     private static final int BLOCK_SIZE = 256 << 20;
-    private static final long INTERVAL_US = 10;
+    private static final long INTERVAL_US = 500;
+    private final int NUMBER_OF_TAILERS = 2;
 
     @Test()
     public void doTest() throws IOException, InterruptedException {
@@ -47,7 +57,7 @@ public class BackwardsRollIssue extends ChronicleQueueTestBase {
             final String name = Thread.currentThread().getName();
             final AffinityLock rlock = AffinityLock.acquireLock();
             final Bytes bytes = NativeBytes.nativeBytes(BYTES_LENGTH).unchecked(true);
-            try (ChronicleQueue rqueue = new SingleChronicleQueueBuilder(path)
+            try (RollingChronicleQueue rqueue = new SingleChronicleQueueBuilder(path)
                     .wireType(WireType.FIELDLESS_BINARY)
                     .rollCycle(RollCycles.TEST_SECONDLY)
                     .blockSize(BLOCK_SIZE)
@@ -55,20 +65,26 @@ public class BackwardsRollIssue extends ChronicleQueueTestBase {
 
                 final ExcerptTailer tailer = rqueue.createTailer();
 
-                long current;
-                long last = tailer.index();
-                System.out.println("first index is: " + last);
+                long lastIdx = tailer.index();
+                long lastN = 0;
+                System.out.println("first index is: " + lastIdx);
                 while (!Thread.interrupted()) {
-                    bytes.clear();
                     if (tailer.readBytes(bytes)) {
-                        current = tailer.index();
-                        if (last == 0)
-                            System.out.println(name + " first index is: " + current);
 
-                        if (current < last)
-                            System.out.println(name + " index went backwards from " + last + " to " + current);
+                        long currIdx = tailer.index();
 
-                        last = current;
+                        if (lastIdx == 0)
+                            System.out.println(name + " first index is: " + currIdx);
+
+                        if (currIdx <= lastIdx)
+                            System.err.println(name + " index went backwards from " + lastIdx + " to " + currIdx);
+
+                        long n = bytes.readLong();
+                        if (n <= lastN)
+                            System.out.println("n did not go up! " + n + " last: " + lastN);
+
+                        lastIdx = currIdx;
+                        lastN = n;
                         counter.incrementAndGet();
                     }
                 }
@@ -79,8 +95,11 @@ public class BackwardsRollIssue extends ChronicleQueueTestBase {
                 System.out.printf("Read %,d messages", counter.intValue());
             }
         };
-        Thread tailerThread = new Thread(reader, "tailer-thread1");
-        Thread tailerThread2 = new Thread(reader, "tailer-thread2");
+        List<Thread> tailers = new ArrayList<>();
+        for (int i = 0; i < NUMBER_OF_TAILERS; i++) {
+            Thread tailerThread = new Thread(reader, "tailer-thread-"+i);
+            tailers.add(tailerThread);
+        }
 
         long runs = 2_000_000;
 
@@ -115,8 +134,7 @@ public class BackwardsRollIssue extends ChronicleQueueTestBase {
             }
         }, "appender-thread");
 
-        tailerThread.start();
-        tailerThread2.start();
+        tailers.forEach(Thread::start);
         Jvm.pause(100);
 
         appenderThread.start();
@@ -125,17 +143,128 @@ public class BackwardsRollIssue extends ChronicleQueueTestBase {
 
         //Pause to allow tailer to catch up (if needed)
         for (int i = 0; i < 10; i++) {
-            if (runs != counter.get())
-                Jvm.pause(Jvm.isDebug() ? 10000 : 100);
+            if (runs * NUMBER_OF_TAILERS > counter.get())
+                Jvm.pause(Jvm.isDebug() ? 10000 : 1000);
         }
 
         for (int i = 0; i < 10; i++) {
-            tailerThread.interrupt();
-            tailerThread.join(100);
-            tailerThread2.interrupt();
-            tailerThread2.join(100);
+            for (final Thread tailer : tailers) {
+                tailer.interrupt();
+                tailer.join(100);
+            }
         }
 
-        assertEquals(runs * 2, counter.get());
+        assertEquals(runs * NUMBER_OF_TAILERS, counter.get());
+    }
+
+    @Test()
+    public void doTest2() throws IOException, InterruptedException, ExecutionException {
+        String path = getTmpDir() + "/backRoll.q";
+        new File(path).deleteOnExit();
+
+        AtomicLong counter = new AtomicLong();
+        AtomicLong lastIndex = new AtomicLong();
+
+        int runs = 1_000_000;
+        final Future appenderFuture = Executors.newSingleThreadExecutor(new NamedThreadFactory
+                ("appender-thread")).submit(() -> {
+            final RollingChronicleQueue queue = new SingleChronicleQueueBuilder(path)
+                    .wireType(WireType.FIELDLESS_BINARY)
+                    .rollCycle(TEST_SECONDLY)
+                    .blockSize(BLOCK_SIZE)
+                    .build();
+
+            final ExcerptAppender appender = queue.acquireAppender();
+
+            long next = System.nanoTime() + INTERVAL_US * 1000;
+            for (int i = 0; i < runs; i++) {
+                while (System.nanoTime() < next)
+                    /* busy wait*/ ;
+                long start = next;
+                try (DocumentContext dc = appender.writingDocument();) {
+                    dc.wire().write().int64(start);
+                    lastIndex.set(dc.index());
+                }
+
+                next += INTERVAL_US * 1000;
+            }
+            queue.close();
+        });
+
+        final Runnable reader = () -> {
+            final String name = Thread.currentThread().getName();
+            final RollingChronicleQueue queue = new SingleChronicleQueueBuilder(path)
+                    .wireType(WireType.FIELDLESS_BINARY)
+                    .rollCycle(TEST_SECONDLY)
+                    .blockSize(BLOCK_SIZE)
+                    .build();
+            RollCycle rollCycle = queue.rollCycle();
+
+            final ExcerptTailer tailer = queue.createTailer();
+
+            long current;
+            long last = tailer.index();
+            long firstCycle = queue.firstCycle();
+
+            for (; ; ) {
+                try (DocumentContext dc = tailer.readingDocument()) {
+
+                    // this will occur when there is no more data to read
+                    if (!dc.isPresent()) {
+                        if (appenderFuture.isDone())
+                            return;
+                        Thread.yield();
+                        continue;
+                    }
+
+                    // read the data that was written
+                    long readData = dc.wire().read().int64();
+                    current = dc.index();
+
+                    if (firstCycle == Integer.MAX_VALUE) {
+                        firstCycle = queue.firstCycle();
+                        System.out.println(name + " first cycle is: " + firstCycle);
+                    }
+
+                    if (last == 0)
+                        System.out.println(name + " first index is: " + current);
+                    else {
+
+                        // its dangerous to make this assumption, "current < last" you have
+                        // to look at it like this :
+
+                        int currentCycle = rollCycle.toCycle(current);
+                        int lastCycle = rollCycle.toCycle(last);
+
+                        long currentSeq = rollCycle.toSequenceNumber(current);
+                        long lastSeq = rollCycle.toSequenceNumber(last);
+
+                        Assert.assertTrue("currentCycle=" + currentCycle + ",lastCycle=" + lastCycle + ",firstCycle=" + firstCycle, currentCycle >= lastCycle);
+
+                        if (currentCycle == lastCycle &&
+                                currentSeq != rollCycle.toSequenceNumber(-1) && lastSeq !=
+                                rollCycle.toSequenceNumber(-1)) {
+                            Assert.assertTrue("currentSeq=" + currentSeq + ",lastSeq=" + lastSeq, currentSeq >= lastSeq);
+                        }
+                    }
+                    last = current;
+                    counter.incrementAndGet();
+                }
+            }
+        };
+
+        final Future<?> reader1 = Executors.newSingleThreadExecutor(new NamedThreadFactory
+                ("tailer-thread1")).submit(reader);
+        final Future<?> reader2 = Executors.newSingleThreadExecutor(new NamedThreadFactory
+                ("tailer-thread2")).submit(reader);
+
+        appenderFuture.get();
+        System.out.println("appender is done. lastIndex=" + lastIndex);
+
+        // wait for reader 1 and 2
+        reader1.get();
+        reader2.get();
+
+        assertEquals(runs * NUMBER_OF_TAILERS, counter.get());
     }
 }
