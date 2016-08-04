@@ -21,6 +21,7 @@ import net.openhft.chronicle.queue.impl.RollingChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.wire.DocumentContext;
 import net.openhft.chronicle.wire.WireType;
+import org.jetbrains.annotations.NotNull;
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -35,9 +36,9 @@ import static net.openhft.chronicle.queue.RollCycles.TEST_SECONDLY;
 
 public class CycleNotFoundTest extends ChronicleQueueTestBase {
     private static final int BLOCK_SIZE = 256 << 20;
-    private static final int NUMBER_OF_TAILERS = 2;
+    private static final int NUMBER_OF_TAILERS = 8;
     private static final long INTERVAL_US = 25;
-    private static final long NUMBER_OF_MSG = 1_000;
+    private static final long NUMBER_OF_MSG = 100_000;
 
     @Ignore("long running test")
     @Test
@@ -48,41 +49,51 @@ public class CycleNotFoundTest extends ChronicleQueueTestBase {
         AtomicLong counter = new AtomicLong();
 
         Runnable reader = () -> {
-            try (RollingChronicleQueue rqueue = new SingleChronicleQueueBuilder(path)
+            try (RollingChronicleQueue rqueue = SingleChronicleQueueBuilder.binary(path)
                     .wireType(WireType.FIELDLESS_BINARY)
                     .rollCycle(RollCycles.TEST_SECONDLY)
                     .blockSize(BLOCK_SIZE)
                     .build()) {
 
                 final ExcerptTailer tailer = rqueue.createTailer();
-                long last = -1;
-                TailerState lastState = TailerState.UNINTIALISED;
 
-                while (!Thread.interrupted()) {
+                long lastNum = -1;
+                TailerState lastState = tailer.state();
+                int lastCycle = -1;
+                long lastIndex = -1;
+
+                while (!Thread.interrupted())
                     try (DocumentContext dc = tailer.readingDocument()) {
+                        long n;
                         if (!dc.isPresent()) {
                             lastState = tailer.state();
+                            continue;
                         } else {
-                            long n = dc.wire().read().int64();
-                            if (n <= last)
-                                System.out.println("num did not increase! " + n + " last: " + last);
-                            else if (n != last + 1)
-                                System.out.println("num increased by more than 1! " + n + " last: " + last);
-
-                            last = n;
-                            counter.incrementAndGet();
-                            lastState = tailer.state();
+                            n = dc.wire().read().int64();
                         }
-                    } catch (UnsupportedOperationException uoe) {
-                        uoe.printStackTrace();
-                        System.out.println("last state before exception: " + lastState);
-                        TailerState state = tailer.state();
-                        System.out.println("current state: " + state);
-                        lastState = state;
+                        if (n != lastNum + 1) {
+                            if (n <= lastNum) dl("num did not increase! " + n + " lastNum: " + lastNum);
+                            else dl("num increased by more than 1! " + n + " lastNum: " + lastNum);
+
+                            dl("lastState: " + lastState + "curr: " + tailer.state());
+                            dl("lastCycle: " + lastCycle + "curr: " + tailer.cycle());
+                            dl("lastIndex: " + lastIndex + "curr: " + tailer.index());
+
+                            long atLast = readLongAtIndex(rqueue, lastIndex);
+                            dl("at lastIndex: " + atLast);
+                            long atCurrent = readLongAtIndex(rqueue, tailer.index());
+                            dl("at currIndex: " + atCurrent);
+                        }
+
+                        lastNum = n;
+                        lastState = tailer.state();
+                        lastCycle = tailer.cycle();
+                        lastIndex = tailer.index();
+                        counter.incrementAndGet();
+                    } catch (UnsupportedOperationException ignored) {
                     }
-                }
             } finally {
-                System.out.printf("Read %,d messages", counter.intValue());
+                dl("Read " + counter.intValue() + " messages");
             }
         };
 
@@ -118,7 +129,7 @@ public class CycleNotFoundTest extends ChronicleQueueTestBase {
 
         appenderThread.start();
         appenderThread.join();
-        System.out.println("appender is done.");
+        dl("appender is done.");
 
         //Pause to allow tailer to catch up (if needed)
         for (int i = 0; i < 10; i++) {
@@ -135,5 +146,20 @@ public class CycleNotFoundTest extends ChronicleQueueTestBase {
         Thread.sleep(200);
 
         assertEquals(NUMBER_OF_MSG * NUMBER_OF_TAILERS, counter.get());
+    }
+
+    @NotNull
+    protected long readLongAtIndex(RollingChronicleQueue queue, long index) {
+        ExcerptTailer tailer1 = queue.createTailer();
+        tailer1.moveToIndex(index);
+        long reread;
+        try (DocumentContext dc1 = tailer1.readingDocument()) {
+            reread = dc1.wire().read().int64();
+        }
+        return reread;
+    }
+
+    protected void dl(String msg) {
+        System.out.println(Thread.currentThread().getName() + ":" + msg);
     }
 }
