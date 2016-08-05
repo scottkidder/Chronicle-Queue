@@ -18,7 +18,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import static junit.framework.TestCase.assertEquals;
 import static junit.framework.TestCase.assertFalse;
+import static junit.framework.TestCase.assertTrue;
 
 /**
  * Created by skidder on 8/2/16.
@@ -51,7 +53,7 @@ public class RareAppenderLatencyTest {
 
     @Test
     public void testRareAppenderLatency() throws IOException, InterruptedException, ExecutionException {
-        System.setProperty("ignoreHeaderCountIfNumberOfExcerptsBehindExceeds", "" + (1 << 12));
+        System.setProperty("ignoreHeaderCountIfNumberOfBytesBehindExceeds", "" + (1 << 12));
 
         if (Jvm.isDebug())
             // this is a performance test so should not be run in debug mode
@@ -63,12 +65,11 @@ public class RareAppenderLatencyTest {
             // this is a performance test so should not be run with assertions turned on
             return;
 
-        System.out.println("starting test");
         String pathname = OS.getTarget() + "/testRareAppenderLatency-" + System.nanoTime();
         new File(pathname).deleteOnExit();
 
         // Shared queue between two threads appending. One appends very rarely, another heavily.
-        ChronicleQueue queue = new SingleChronicleQueueBuilder(pathname)
+        ChronicleQueue queue = SingleChronicleQueueBuilder.binary(pathname)
                 .rollCycle(RollCycles.HOURLY)
                 .build();
 
@@ -79,7 +80,7 @@ public class RareAppenderLatencyTest {
         for (int i = 0; i < RARE_MSGS; i++) {
             try (DocumentContext ctx = rareAppender.writingDocument()) {
                 ctx.wire()
-                        .write(() -> "ts").int64(System.currentTimeMillis())
+                        .write(() -> "ts").int64(System.nanoTime())
                         .write(() -> "msg").text(text);
             }
         }
@@ -87,44 +88,74 @@ public class RareAppenderLatencyTest {
         // Write a bunch of messages from another thread.
         Future f = appenderES.submit(() -> {
             ExcerptAppender appender = queue.acquireAppender();
-            long start = System.currentTimeMillis();
+            long start = System.nanoTime();
             for (int i = 0; i < HEAVY_MSGS; i++) {
                 try (DocumentContext ctx = appender.writingDocument()) {
                     ctx.wire()
-                            .write(() -> "ts").int64(System.currentTimeMillis())
+                            .write(() -> "ts").int64(System.nanoTime())
                             .write(() -> "msg").text(text);
                 }
                 if (appenderES.isShutdown())
                     return;
             }
 
-            System.out.println("Wrote heavy " + HEAVY_MSGS + " msgs in " + (System.currentTimeMillis() - start) + " ms");
+            long now = System.nanoTime();
+            long durUs = (now - start) / 1000;
+            System.out.println("Wrote heavy " + HEAVY_MSGS + " msgs in " + durUs + " us");
+            System.out.println("Avg " + durUs / HEAVY_MSGS + " us per msg");
         });
 
         f.get();
 
         // Write a message from the Main thread again (this will have unacceptable latency!)
         rareAppender = queue.acquireAppender();
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime();
         try (DocumentContext ctx = rareAppender.writingDocument()) {
             ctx.wire()
-                    .write(() -> "ts").int64(System.currentTimeMillis())
+                    .write(() -> "ts").int64(System.nanoTime())
                     .write(() -> "msg").text(text);
         }
-        long l = System.currentTimeMillis() - now;
+        long l = System.nanoTime() - now;
 
 
         // Write another message from the Main thread (this will be fast since we are caught up)
-        now = System.currentTimeMillis();
+        now = System.nanoTime();
         try (DocumentContext ctx = rareAppender.writingDocument()) {
             ctx.wire()
-                    .write(() -> "ts").int64(System.currentTimeMillis())
+                    .write(() -> "ts").int64(System.nanoTime())
                     .write(() -> "msg").text(text);
         }
-        System.out.println("Wrote first rare one in " + l + " ms");
-        System.out.println("Wrote another rare one in " + (System.currentTimeMillis() - now) + " ms");
+        System.out.println("Wrote first rare one in " + l/1000 + " us");
+        System.out.println("Wrote another rare one in " + (System.nanoTime() - now)/1000 + " us");
 
-        assertFalse("Appending from rare thread latency too high!", l > 150);
+        assertFalse("Appending from rare thread latency too high!", l/1000 > 50_000);
+
+        ChronicleQueue anotherQ = new SingleChronicleQueueBuilder(pathname)
+                .rollCycle(RollCycles.HOURLY)
+                .build();
+
+        ExcerptTailer tailer = anotherQ.createTailer();
+        int totalMsgs = HEAVY_MSGS + RARE_MSGS + 2;
+
+        long count = 0;
+        long lastTs = 0;
+        for (; ;) {
+            try (DocumentContext dc = tailer.readingDocument()) {
+                if (!dc.isPresent()) {
+                    break;
+                }
+                long ts = dc.wire().read(() -> "ts").int64();
+                assertTrue("timestamp went backwards! " + ts + " " + lastTs, ts >= lastTs);
+                lastTs = ts;
+
+                String msg = dc.wire().read(() -> "msg").text();
+                assertTrue("text was wrong length" + msg.length(), msg.length() == 360);
+
+                count++;
+            }
+        }
+
+        assertEquals(totalMsgs, count);
     }
 
     @NotNull
