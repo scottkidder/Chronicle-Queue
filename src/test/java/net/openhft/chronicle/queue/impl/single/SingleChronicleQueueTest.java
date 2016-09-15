@@ -1736,6 +1736,8 @@ public class SingleChronicleQueueTest extends ChronicleQueueTestBase {
     @Test
     public void testAppendedSkipToEndMultiThreaded() throws TimeoutException, ExecutionException, InterruptedException {
 
+        //exceptionKeyIntegerMap = Jvm.recordExceptions(true);
+
         // some text to simulate load.
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < 5; i++) sb.append(UUID.randomUUID());
@@ -1772,18 +1774,31 @@ public class SingleChronicleQueueTest extends ChronicleQueueTestBase {
         for (int i = 0; i < 5; i++) sb.append(UUID.randomUUID());
         String text = sb.toString();
 
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 5; i++) {
             try (ChronicleQueue q = SingleChronicleQueueBuilder.binary(getTmpDir())
                     .wireType(this.wireType)
                     .rollCycle(TEST_SECONDLY)
                     .build()) {
+                ExecutorService service = Executors.newWorkStealingPool(2);
 
                 final ThreadLocal<ExcerptAppender> tl = ThreadLocal.withInitial(q::acquireAppender);
                 final ThreadLocal<ExcerptTailer> tlt = ThreadLocal.withInitial(q::createTailer);
 
-                int size = 200_000;
+                int size = 20_000_000;
+                int split = 100;
+                for (int j = 0; j < size; j += size / split) {
+                    for (int k = 0; k < size / split; k++) {
+                        service.submit(() -> doSomthing(tl, tlt, text));
+                    }
+                    Jvm.pause(10);
+                }
 
-                IntStream.range(0, size).parallel().forEach(j -> doSomthing(tl, tlt, text));
+                service.shutdown();
+                System.out.println("awaiting termination");
+                service.awaitTermination(5, TimeUnit.MINUTES);
+                System.out.println("termination complete");
+
+                // IntStream.range(0, size).parallel().forEach(j -> doSomthing(tl, tlt, text));
                 System.out.println(".");
             }
         }

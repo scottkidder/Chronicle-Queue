@@ -307,8 +307,8 @@ public class SingleChronicleQueueStore implements WireStore {
                 .int64forBinding(-1L, lastAcknowledgedIndexReplicated);
         wire.write(MetaDataField.recovery).typedMarshallable(recovery);
         wire.write(MetaDataField.deltaCheckpointInterval).int32(this.deltaCheckpointInterval);
-        wire.padToCacheAlign();
-        wire.write(MetaDataField.writePosition).int64forBinding(0L, writePosition);
+        wire.padToCacheAlign()
+                .write(MetaDataField.writePosition).int64forBinding(0L, writePosition);
     }
 
     @Override
