@@ -108,8 +108,7 @@ class SCQIndexing implements Demarshallable, WriteMarshallable, Closeable {
         wire.write(IndexingFields.indexCount).int64(indexCount)
                 .write(IndexingFields.indexSpacing).int64(indexSpacing)
                 .write(IndexingFields.index2Index).int64forBinding(0L, index2Index)
-                .write(IndexingFields.lastIndex).int64forBinding(0L, nextEntryToBeIndexed);
-        //
+                .writeAlignTo(64, 0).write(IndexingFields.lastIndex).int64forBinding(0L, nextEntryToBeIndexed);
     }
 
     /**

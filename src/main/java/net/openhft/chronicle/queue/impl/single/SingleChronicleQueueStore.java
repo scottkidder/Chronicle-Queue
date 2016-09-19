@@ -73,6 +73,8 @@ public class SingleChronicleQueueStore implements WireStore {
         try {
             this.wireType = wire.read(MetaDataField.wireType).object(WireType.class);
             assert wireType != null;
+            this.writePosition = wire.newLongReference();
+            wire.read(MetaDataField.writePosition).int64(writePosition);
             this.roll = wire.read(MetaDataField.roll).typedMarshallable();
             this.mappedBytes = (MappedBytes) (wire.bytes());
             this.mappedFile = mappedBytes.mappedFile();
@@ -100,8 +102,6 @@ public class SingleChronicleQueueStore implements WireStore {
                 this.deltaCheckpointInterval = -1; // disabled.
             }
 
-            this.writePosition = wire.newLongReference();
-            wire.read(MetaDataField.writePosition).int64(writePosition);
             this.indexing.writePosition = writePosition;
 
         } finally {
@@ -300,13 +300,13 @@ public class SingleChronicleQueueStore implements WireStore {
             lastAcknowledgedIndexReplicated = wire.newLongReference();
 
         wire.write(MetaDataField.wireType).object(wireType)
+                .writeAlignTo(64, 0).write(MetaDataField.writePosition).int64forBinding(0L, writePosition)
                 .write(MetaDataField.roll).typedMarshallable(this.roll)
                 .write(MetaDataField.indexing).typedMarshallable(this.indexing)
                 .write(MetaDataField.lastAcknowledgedIndexReplicated)
                 .int64forBinding(-1L, lastAcknowledgedIndexReplicated);
         wire.write(MetaDataField.recovery).typedMarshallable(recovery);
         wire.write(MetaDataField.deltaCheckpointInterval).int32(this.deltaCheckpointInterval);
-        wire.padToCacheAlign().write(MetaDataField.writePosition).int64forBinding(0L, writePosition);
     }
 
     @Override
