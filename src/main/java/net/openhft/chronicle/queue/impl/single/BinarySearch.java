@@ -14,7 +14,7 @@ import java.util.NavigableSet;
 /**
  * @author Rob Austin.
  */
-enum BinarySearch {
+public enum BinarySearch {
     INSTANCE;
 
     /**
@@ -81,6 +81,11 @@ enum BinarySearch {
     }
 
 
+    /**
+     *
+     * @return The index if an exact match is found, an approximation in the form of -approximateIndex
+     * or -1 if there was no searching to be done.
+     */
     private static long findWithinCycle(Wire key,
                                         Comparator<Wire> c,
                                         int cycle,
@@ -95,10 +100,17 @@ enum BinarySearch {
             if (highSeqNum == 0)
                 return rollCycle.toIndex(cycle, 0);
 
+            // nothing to search
+            if (highSeqNum < lowSeqNum)
+                return -1;
+
+            long midIndex = 0;
+
             while (lowSeqNum <= highSeqNum) {
                 long midSeqNumber = (lowSeqNum + highSeqNum) >>> 1L;
 
-                final long midIndex = rollCycle.toIndex(cycle, midSeqNumber);
+                midIndex = rollCycle.toIndex(cycle, midSeqNumber);
+
                 try (DocumentContext dc = moveTo(midIndex, tailer)) {
                     if (!dc.isPresent())
                         return -1;
@@ -112,9 +124,9 @@ enum BinarySearch {
                     else
                         return midIndex; // key found
                 }
-
             }
-            return -1;  // key not found
+
+            return -midIndex;  // -approximateIndex
         } finally {
             key.bytes().readPosition(readPosition);
         }
